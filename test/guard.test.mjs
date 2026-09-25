@@ -59,21 +59,6 @@ test('未启用时不注册任何 guard', () => {
   }
 })
 
-test('工作区没有 contract/ 时拒绝启用', () => {
-  const saved = { ...process.env }
-  process.env.DSH_CLAIM_CHECK = '1'
-  const bare = mkdtempSync(join(tmpdir(), 'cc-bare-'))
-  try {
-    const { ctx, guards, logs } = makeCtx()
-    apply(ctx, { root: bare })
-    assert.equal(guards.length, 0, '没有 contract/ 就不注册')
-    assert.ok(logs.some(([lvl, m]) => lvl === 'warn' && m.includes('没有 contract/')))
-  } finally {
-    rmSync(bare, { recursive: true, force: true })
-    process.env = saved
-  }
-})
-
 test('guard 拒绝写判定，并写入 attempts.jsonl', () => {
   const saved = { ...process.env }
   process.env.DSH_CLAIM_CHECK = '1'
@@ -193,5 +178,52 @@ test('bash 触碰受保护路径按写拒绝', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
     process.env = saved
+  }
+})
+
+test('候选 root 都没有 contract/ 时警告并退化为不拦截（防静默失效）', () => {
+  const savedEnv = { ...process.env }
+  const savedCwd = process.cwd()
+  process.env.DSH_CLAIM_CHECK = '1'
+  const first = mkdtempSync(join(tmpdir(), 'cc-r1-'))
+  const second = mkdtempSync(join(tmpdir(), 'cc-r2-'))
+  try {
+    // 把 cwd 也换到没有 contract/ 的地方，确保三个候选全部落空
+    process.chdir(first)
+    const { ctx, guards, logs } = makeCtx()
+    apply(ctx, { root: second })
+    assert.equal(guards.length, 0, '没有活动工作区就不注册守卫')
+    assert.ok(
+      logs.some(([lvl, m]) => lvl === 'warn' && m.includes('不会拦截任何东西')),
+      '必须留下一条明确的警告',
+    )
+  } finally {
+    process.chdir(savedCwd)
+    rmSync(first, { recursive: true, force: true })
+    rmSync(second, { recursive: true, force: true })
+    process.env = savedEnv
+  }
+})
+
+test('显式 root 指错时，兜底候选仍能命中（cwd 是活动工作区）', () => {
+  const savedEnv = { ...process.env }
+  const savedCwd = process.cwd()
+  process.env.DSH_CLAIM_CHECK = '1'
+  const real = makeWorkspace()
+  const wrong = mkdtempSync(join(tmpdir(), 'cc-wrong-'))
+  try {
+    process.chdir(real) // cwd 才是真正的工作区
+    const { ctx, run, logs } = makeCtx()
+    apply(ctx, { root: wrong })
+
+    const reason = run({ name: 'write', arguments: { file_path: join(real, 'contract', 'contract.judgment.md') } })
+    assert.ok(typeof reason === 'string', '绝对路径在第二个候选（cwd）上被解析，应当被拦')
+    assert.equal(attemptLines(real)[0].action, 'write')
+    assert.ok(logs.some(([lvl, m]) => lvl === 'info' && m.includes('候选=')), '应报告候选数量')
+  } finally {
+    process.chdir(savedCwd)
+    rmSync(real, { recursive: true, force: true })
+    rmSync(wrong, { recursive: true, force: true })
+    process.env = savedEnv
   }
 })

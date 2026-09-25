@@ -23,7 +23,7 @@ import {
 
 const ROOT = '/work/proj'
 const CFG = {
-  root: ROOT,
+  roots: [ROOT],
   judgmentPath: 'contract/contract.judgment.md',
   evidenceDir: 'evidence',
   hideJudgment: true,
@@ -115,6 +115,22 @@ test('inspect：工作区之外的路径不干预', () => {
   assert.equal(inspect('read', { file_path: '/tmp/contract/contract.judgment.md' }, CFG), null)
 })
 
+test('inspect：多 root —— 第一个解析不到时尝试其余候选（防 cwd 静默失效）', () => {
+  const multi = { ...CFG, roots: ['/somewhere/else', ROOT] }
+  const hit = inspect('write', { file_path: `${ROOT}/contract/contract.judgment.md` }, multi)
+  assert.equal(hit?.action, 'write', '第二个 root 应命中')
+  assert.equal(hit?.target, 'contract/contract.judgment.md')
+
+  // 相对路径：只有正确的 root 能把它解释成受保护路径
+  const relHit = inspect('read', { file_path: 'contract/contract.judgment.md' }, multi)
+  assert.equal(relHit?.action, 'read', '相对路径应在能解析它的 root 上命中')
+})
+
+test('inspect：多 root 都不匹配时不干预', () => {
+  const none = { ...CFG, roots: ['/a', '/b'] }
+  assert.equal(inspect('write', { file_path: `${ROOT}/contract/contract.judgment.md` }, none), null)
+})
+
 test('identityOf：从 agent 取安全字段，坏输入不抛', () => {
   assert.deepEqual(identityOf({ id: 'a1', session: 's1' }), { id: 'a1', session: 's1' })
   assert.deepEqual(identityOf({ name: 'n', session: { id: 's2' } }), { id: 'n', session: 's2' })
@@ -133,7 +149,8 @@ test('isEnabled：默认关闭，显式开关才启用', () => {
 
 test('resolveConfig：环境变量兜底与默认值', () => {
   const cfg = resolveConfig({}, { DSH_CLAIM_CHECK_ROOT: '/r', DSH_CLAIM_CHECK_BUDGET: '7' })
-  assert.equal(cfg.root, '/r')
+  assert.equal(cfg.roots[0], '/r', '显式 root 排第一')
+  assert.ok(cfg.roots.length >= 1)
   assert.equal(cfg.budget, 7)
   assert.equal(cfg.judgmentPath, 'contract/contract.judgment.md')
   assert.equal(cfg.hideJudgment, true)

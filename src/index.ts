@@ -72,7 +72,8 @@ export interface ClaimCheckConfig {
 
 /** 解析后的配置。 */
 interface Resolved {
-  readonly root: string
+  /** 候选工作区根目录；第一个来自配置/环境变量，其余为兜底。 */
+  readonly roots: readonly string[]
   readonly judgmentPath: string
   readonly evidenceDir: string
   readonly logPath: string
@@ -174,11 +175,15 @@ export function isJudgmentCommand(text: unknown): boolean {
  *
  * 返回 null 表示不干预。纯函数，无副作用——副作用（计数、写日志）在 apply 里做，
  * 这样这段逻辑可以被完整单测。
+ *
+ * 传入的是**候选 root 列表**：逐个尝试解析，第一个能把目标路径解释成受保护相对路径的
+ * 胜出。这是为了消掉一个静默失效——若 agent 用相对路径而 DSH 的 cwd 与工作区不一致，
+ * 单 root 会把它解析到工作区之外，守卫就永远不触发。
  */
 export function inspect(
   toolName: string,
   args: unknown,
-  cfg: Pick<Resolved, 'root' | 'judgmentPath' | 'evidenceDir' | 'hideJudgment'>,
+  cfg: Pick<Resolved, 'roots' | 'judgmentPath' | 'evidenceDir' | 'hideJudgment'>,
 ): ClaimCheckHit | null {
   const isShell = toolName === 'bash' || toolName === 'pwsh'
 
@@ -187,7 +192,8 @@ export function inspect(
     const paths = [cfg.judgmentPath, cfg.evidenceDir]
     if (!bashTouches(command, paths)) return null
     // 命令里出现受保护路径：按"写"处理（重定向、rm、sed -i、cp 都归入这一类）。
-    const rel = toWorkspaceRelative(cfg.root, cfg.judgmentPath)
+    // bash 走的是名称匹配而非路径解析，因此不需要 root——但返回值里给一个当前能解析的。
+    const rel = firstResolvable(cfg, cfg.judgmentPath)
     return {
       target: rel,
       action: 'write',
@@ -196,24 +202,38 @@ export function inspect(
   }
 
   for (const raw of extractPaths(toolName, args)) {
-    const rel = toWorkspaceRelative(cfg.root, raw)
-    const kind = classifyPath(rel, cfg)
-    if (kind === null) continue
+    for (const root of cfg.roots) {
+      const rel = toWorkspaceRelative(root, raw)
+      const kind = classifyPath(rel, cfg)
+      if (kind === null) continue
 
-    const writable = toolName === 'write' || toolName === 'edit' || toolName === 'str_replace_editor'
-    if (writable) {
-      return {
-        target: rel,
-        action: 'write',
-        reason: kind === 'judgment' ? '判据不是实现者能改的' : '证据目录是 append-only 的',
+      const writable = toolName === 'write' || toolName === 'edit' || toolName === 'str_replace_editor'
+      if (writable) {
+        return {
+          target: rel,
+          action: 'write',
+          reason: kind === 'judgment' ? '判据不是实现者能改的' : '证据目录是 append-only 的',
+        }
+      }
+      if (kind === 'judgment' && cfg.hideJudgment) {
+        return { target: rel, action: 'read', reason: '判据对实现者不可见（改了它就没有独立判定）' }
+      }
+      if (kind === 'evidence') {
+        return { target: rel, action: 'read', reason: '证据只由 evidence.mjs 写入与读取' }
       }
     }
-    if (kind === 'judgment' && cfg.hideJudgment) {
-      return { target: rel, action: 'read', reason: '判据对实现者不可见（改了它就没有独立判定）' }
-    }
-    if (kind === 'evidence') {
-      return { target: rel, action: 'read', reason: '证据只由 evidence.mjs 写入与读取' }
-    }
+  }
+  return null
+}
+
+/** 在候选 root 里找第一个能把该相对路径解析成工作区内路径的 root。 */
+function firstResolvable(
+  cfg: Pick<Resolved, 'roots'>,
+  relPath: string,
+): string | null {
+  for (const root of cfg.roots) {
+    const rel = toWorkspaceRelative(root, relPath)
+    if (rel !== null) return rel
   }
   return null
 }
@@ -283,18 +303,33 @@ export function isEnabled(env: Record<string, string | undefined> = process.env)
   return Boolean(env['DSH_CLAIM_CHECK']) || Boolean(env['DSH_CLAIM_CHECK_ROOT'])
 }
 
-/** 把配置与环境变量合成一份解析后的配置。 */
+/**
+ * 把配置与环境变量合成一份解析后的配置。
+ *
+ * `roots` 是**候选列表**：显式配置/环境变量优先，其余为兜底，去重后按顺序尝试。
+ * 多个候选存在的唯一理由是消掉"cwd 与工作区不一致"导致的静默失效。
+ *
+ * `logPath` 落在**活动工作区**（含 contract/ 的那个候选）下，而不是显式传入的 root ——
+ * 否则当显式 root 指错、守卫靠兜底候选命中时，日志会被写到没人看的地方。
+ */
 export function resolveConfig(
   config: ClaimCheckConfig = {},
   env: Record<string, string | undefined> = process.env,
 ): Resolved {
-  const root = config.root ?? env['DSH_CLAIM_CHECK_ROOT'] ?? process.cwd()
+  const explicit = config.root ?? env['DSH_CLAIM_CHECK_ROOT']
+  const candidates = [explicit, process.cwd(), '/mnt/d/MyProject']
+  const roots: string[] = []
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.length > 0 && !roots.includes(c)) roots.push(c)
+  }
+
+  const active = firstRootWithContract(roots)
   const budgetRaw = config.budget ?? Number(env['DSH_CLAIM_CHECK_BUDGET'] ?? 3)
   return {
-    root,
+    roots,
     judgmentPath: config.judgmentPath ?? DEFAULT_JUDGMENT,
     evidenceDir: config.evidenceDir ?? DEFAULT_EVIDENCE,
-    logPath: join(root, config.logPath ?? DEFAULT_EVIDENCE),
+    logPath: join(active ?? explicit ?? roots[0] ?? process.cwd(), config.logPath ?? DEFAULT_EVIDENCE),
     budget: Number.isFinite(budgetRaw) && budgetRaw >= 0 ? budgetRaw : 3,
     hideJudgment: config.hideJudgmentFromImplementer !== false,
   }
@@ -324,9 +359,12 @@ export function apply(ctx: {
   }
 
   const cfg = resolveConfig(config)
-  if (!existsSync(join(cfg.root, 'contract'))) {
+  const activeRoot = firstRootWithContract(cfg.roots)
+  if (activeRoot === null) {
+    // 这条 warning 是刻意的：本插件最危险的失效模式是"装上了但从不触发"。
     ctx.logger?.warn(
-      `dsh-claim-check: ${cfg.root} 下没有 contract/ 目录，本工作区未启用 claim-check`,
+      `dsh-claim-check: 已启用，但候选工作区里都没有 contract/ 目录（试过 ${cfg.roots.join(', ')}）。` +
+        `守卫不会拦截任何东西——请把 DSH_CLAIM_CHECK_ROOT 指向真正的工作区。`,
     )
     return
   }
@@ -388,7 +426,15 @@ export function apply(ctx: {
   host.tools.guard(guard)
 
   ctx.logger?.info(
-    `dsh-claim-check: 已启用 — root=${cfg.root} 判定=${cfg.judgmentPath} ` +
-      `预算=${cfg.budget} 隐藏判定=${cfg.hideJudgment}`,
+    `dsh-claim-check: 已启用 — 活动工作区=${activeRoot} 候选=${cfg.roots.length} ` +
+      `判定=${cfg.judgmentPath} 预算=${cfg.budget} 隐藏判定=${cfg.hideJudgment}`,
   )
+}
+
+/** 返回第一个含 contract/ 的候选 root；都没有则 null。 */
+function firstRootWithContract(roots: readonly string[]): string | null {
+  for (const root of roots) {
+    if (existsSync(join(root, 'contract'))) return root
+  }
+  return null
 }

@@ -67,12 +67,15 @@ test('bashTouches：字面量包含即命中（含 basename）', () => {
   assert.equal(bashTouches(undefined, paths), false)
 })
 
-test('isJudgmentCommand：与 evidence.mjs 的口径一致', () => {
+test('isJudgmentCommand：与 evidence.mjs 的口径一致（judg/judge/verify）', () => {
   assert.equal(isJudgmentCommand('node verify/judgment.mjs'), true)
   assert.equal(isJudgmentCommand('npm run judge'), true)
-  assert.equal(isJudgmentCommand('cat contract/contract.judgment.md'), true)
+  assert.equal(isJudgmentCommand('cat contract/contract.judgment.md'), true, '含 judgment')
   assert.equal(isJudgmentCommand('npm run check'), false, '普通构建不算判定')
   assert.equal(isJudgmentCommand('node --test'), false)
+  assert.equal(isJudgmentCommand('cat contract/contract.requirements.md'), false, '只有 contract 不算判定')
+  // 注意：判断"某命令是否真的吃预算"还有第二道关——被路径检查拦下的写操作不再计入，
+  // 这条在 guard.test.mjs 里测（端到端验证抓到的那次预算被白吃）。
 })
 
 test('inspect：写判定被拒', () => {

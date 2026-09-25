@@ -162,12 +162,17 @@ export function bashTouches(text: unknown, relPaths: readonly string[]): boolean
 /**
  * 从 bash 命令文本里识别"这是一次判定执行"。
  *
- * 与 scripts/evidence.mjs 的口径故意保持一致：命令里出现这些词就算判定。宽进严出——
- * 多算几次判定只会让预算更早触发（更保守），不会放过真正的反复查询。
+ * 口径与 `claim-check/scripts/evidence.mjs` **严格一致**：命令里出现 judg / judge / verify
+ * 就算判定。**刻意不含 `contract`** —— 那个词在路径里出现得太频繁，会把
+ * `sed -i s/a/b/ contract/contract.judgment.md` 这种**写操作**误记成一次判定执行，
+ * 从而白白吃掉判定预算（这一条是端到端验证抓出来的）。
+ *
+ * 宽进严出：多算只会让预算更早触发（更保守），但把无关命令算进来会削弱预算的可信度，
+ * 所以宁可窄。
  */
 export function isJudgmentCommand(text: unknown): boolean {
   if (typeof text !== 'string' || text.length === 0) return false
-  return /judg|contract|verify|judge/i.test(text)
+  return /judg|verify|judge/i.test(text)
 }
 
 /**
@@ -376,10 +381,16 @@ export function apply(ctx: {
     const args = record['arguments']
     const who = identityOf(record['agent'])
 
-    // 判定的执行预算。放在路径检查之前：一次超预算的判定即便不碰受保护路径也要拦。
-    if ((toolName === 'bash' || toolName === 'pwsh') && isJudgmentCommand((args as Record<string, unknown> | null)?.['command'])) {
+    // 顺序很重要：**先跑路径检查**。一条被路径检查拦下的命令（例如
+    // `sed -i s/a/b/ contract/contract.judgment.md`）不该再吃掉一次判定预算 ——
+    // 它已经被拒绝且记录了，重复计数会削弱预算的可信度。
+    const hit = inspect(toolName, args, cfg)
+    const deniedByPath = hit !== null && (hit.action === 'write' || (hit.action === 'read' && cfg.hideJudgment))
+
+    if (!deniedByPath && (toolName === 'bash' || toolName === 'pwsh') && isJudgmentCommand((args as Record<string, unknown> | null)?.['command'])) {
+      // 语义与脚本层（claim-check/scripts/evidence.mjs）严格对齐：**允许 N 次，第 N+1 次拒绝**。
       const used = readJudgmentRuns(cfg.logPath)
-      if (used >= cfg.budget) {
+      if (used + 1 > cfg.budget) {
         const reason =
           `判定执行预算已用尽（${used}/${cfg.budget}）。反复执行并观察结果，是把隐藏判据` +
           `反推出来的主要途径。要放宽就显式调高 DSH_CLAIM_CHECK_BUDGET 并说明理由。`
@@ -402,7 +413,6 @@ export function apply(ctx: {
       })
     }
 
-    const hit = inspect(toolName, args, cfg)
     if (hit === null) return undefined
 
     const denied = hit.action === 'write' || (hit.action === 'read' && cfg.hideJudgment)

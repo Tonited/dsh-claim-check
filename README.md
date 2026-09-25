@@ -18,7 +18,9 @@
 |---|---|
 | **路径级保护** | 拒绝对 `contract/contract.judgment.md` 的写、默认也拒绝读；拒绝写 `evidence/` |
 | **尝试日志** | 每一次对被保护资源的触碰（含被拒的）追加到 `evidence/attempts.jsonl` |
-| **判定执行预算** | 判定命令的执行次数超过上限就拒绝（默认 3 次），并记一条 `reason: "budget"` |
+| **判定执行预算** | 判定命令的执行次数超过上限就拒绝（默认 3 次，语义：**允许 N 次、第 N+1 次拒绝**），并记一条 `reason: "budget"` |
+
+触发词是 `judg` / `judge` / `verify`（与 claim-check 脚本层 `evidence.mjs` 严格一致）。**刻意不含 `contract`**——那个词在路径里出现得太频繁，会把 `sed -i … contract/contract.judgment.md` 这种**写操作**误记成判定执行、白白吃掉预算。顺序也是刻意的：**先跑路径检查**，被它拦下的命令不再另计预算。
 
 注册的是一个 `ToolGuard`——**单调 deny**：任何 guard 都不能把别人的 deny 翻回 allow，所以监听器的顺序无法把拒绝变回许可。
 

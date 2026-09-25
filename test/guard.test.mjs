@@ -146,6 +146,26 @@ test('判定执行预算：允许 N 次，第 N+1 次被拒且记为 denied', ()
   }
 })
 
+test('预算语义与脚本层一致：budget=N 恰好放行 N 次', () => {
+  const saved = { ...process.env }
+  process.env.DSH_CLAIM_CHECK = '1'
+  const root = makeWorkspace()
+  try {
+    const { ctx, run } = makeCtx()
+    apply(ctx, { root, budget: 5 })
+    const exec = { name: 'bash', arguments: { command: 'npm run judge' } }
+    for (let i = 1; i <= 5; i += 1) {
+      assert.equal(run(exec), undefined, `第 ${i} 次应在预算内`)
+    }
+    assert.ok(typeof run(exec) === 'string', '第 6 次应被拒')
+    const counter = JSON.parse(readFileSync(join(root, 'evidence', '.judgment-runs.json'), 'utf8'))
+    assert.equal(counter.runs.length, 5, '恰好 5 次计入')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    process.env = saved
+  }
+})
+
 test('budget=0 表示完全禁止执行判定', () => {
   const saved = { ...process.env }
   process.env.DSH_CLAIM_CHECK = '1'
@@ -175,6 +195,37 @@ test('bash 触碰受保护路径按写拒绝', () => {
     })
     assert.ok(typeof reason === 'string')
     assert.equal(attemptLines(root)[0].action, 'write')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    process.env = saved
+  }
+})
+
+test('写路径的 bash 命令不吃判定预算（端到端验证抓到的 bug）', () => {
+  const saved = { ...process.env }
+  process.env.DSH_CLAIM_CHECK = '1'
+  const root = makeWorkspace()
+  try {
+    const { ctx, run } = makeCtx()
+    apply(ctx, { root, budget: 3 })
+    const counterFile = join(root, 'evidence', '.judgment-runs.json')
+
+    // 这条命令含 contract，曾是预算的触发词，导致被拦一次就吃掉一次预算
+    const reason = run({
+      name: 'bash',
+      arguments: { command: 'sed -i s/a/b/ contract/contract.judgment.md' },
+    })
+    assert.ok(typeof reason === 'string', '仍应被路径检查拦下')
+    assert.equal(existsSync(counterFile), false, '不应计入判定执行')
+
+    // 预算仍然是完整的三次
+    for (let i = 1; i <= 3; i += 1) {
+      assert.equal(
+        run({ name: 'bash', arguments: { command: 'node verify/judgment.mjs' } }),
+        undefined,
+        `第 ${i} 次判定仍应在预算内`,
+      )
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
     process.env = saved

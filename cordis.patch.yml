@@ -1,0 +1,10 @@
+# dsh-claim-check bundle patch —— 把本插件挂载进 profile 的 loader 树。
+#
+# 本插件默认**不生效**：需要在环境变量里给出工作区根目录，且该目录下存在
+# contract/ 目录时才会工作。这样装上去也不会影响其它项目。
+#
+#   DSH_CLAIM_CHECK=1           启用（工作区取进程 cwd）
+#   DSH_CLAIM_CHECK_ROOT=/path  显式指定工作区根目录
+- insert:
+    - id: dsh-claim-check
+      name: dsh-claim-check
